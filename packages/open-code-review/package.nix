@@ -1,62 +1,64 @@
 {
   lib,
-  stdenv,
+  buildGoModule,
+  go_1_26,
   fetchFromGitHub,
+  git,
   installAgentSkills,
-  platformSource,
+  unpinGoModVersionHook,
   versionCheckHook,
   versionCheckHomeHook,
   mkUpdater,
 }:
 
 let
-  source = platformSource {
-    hashesFile = ./hashes.json;
-    platforms = {
-      x86_64-linux = "linux-amd64";
-      aarch64-linux = "linux-arm64";
-      aarch64-darwin = "darwin-arm64";
-    };
-    urlTemplate = "https://github.com/alibaba/open-code-review/releases/download/v{version}/opencodereview-{platform}";
-  };
-  inherit (source) version;
-
-  # The releases ship only the binary, so the skills come from the source tree.
-  # The "platform" updater rewrites hashes.json only, so this hash must be
-  # refreshed by hand on a version bump (the build fails loudly otherwise).
-  skillsSrc = fetchFromGitHub {
-    owner = "alibaba";
-    repo = "open-code-review";
-    tag = "v${version}";
-    hash = "sha256-qRUlkbhGSPv+nxV4yig7EiQ6tNVyGMivm30qZd+TQwc=";
-  };
+  versionData = builtins.fromJSON (builtins.readFile ./hashes.json);
+  inherit (versionData) version hash vendorHash;
   skills = [
     "open-code-review"
     "open-code-review-delegate"
   ];
 in
-stdenv.mkDerivation {
+buildGoModule.override { go = go_1_26; } {
   pname = "open-code-review";
-  inherit (source) version src;
+  inherit version vendorHash;
 
-  # Upstream releases are single statically linked Go binaries.
-  dontUnpack = true;
+  src = fetchFromGitHub {
+    owner = "alibaba";
+    repo = "open-code-review";
+    tag = "v${version}";
+    inherit hash;
+  };
 
-  nativeBuildInputs = [ installAgentSkills ];
+  subPackages = [ "cmd/opencodereview" ];
+
+  ldflags = [
+    "-s"
+    "-w"
+    "-X main.Version=v${version}"
+    "-X main.GitCommit=nixpkgs"
+    "-X main.BuildDate=1970-01-01T00:00:00Z"
+  ];
+
+  nativeBuildInputs = [
+    installAgentSkills
+    # go.mod pins a newer patch release than nixpkgs' go_1_26.
+    unpinGoModVersionHook
+  ];
+  # The source tree also holds SKILL.md files for the VS Code extension and the
+  # docs site; install only the top-level skills/ ones.
   dontInstallAgentSkills = true;
 
-  installPhase = ''
-    runHook preInstall
-    mkdir -p $out/bin
-    install -m755 $src $out/bin/ocr
-    runHook postInstall
-  '';
-
   postInstall = ''
+    mv $out/bin/opencodereview $out/bin/ocr
+
     for skill in ${lib.escapeShellArgs skills}; do
-      installSkill "${skillsSrc}/skills/$skill"
+      installSkill "$src/skills/$skill"
     done
   '';
+
+  # The cmd tests shell out to git.
+  nativeCheckInputs = [ git ];
 
   doInstallCheck = true;
   nativeInstallCheckInputs = [
@@ -72,25 +74,20 @@ stdenv.mkDerivation {
   '';
 
   passthru.category = "Code Review";
-  passthru.updater = mkUpdater (
-    source.updater
-    // {
-      versionSource = {
-        type = "github";
-        owner = "alibaba";
-        repo = "open-code-review";
-      };
-    }
-  );
+  passthru.updater = mkUpdater {
+    kind = "github-source";
+    purl = "pkg:github/alibaba/open-code-review";
+    depHashKey = "vendorHash";
+  };
 
   meta = with lib; {
     description = "AI-powered code review CLI";
     homepage = "https://github.com/alibaba/open-code-review";
     changelog = "https://github.com/alibaba/open-code-review/releases/tag/v${version}";
     license = licenses.asl20;
-    sourceProvenance = with sourceTypes; [ binaryNativeCode ];
+    sourceProvenance = with sourceTypes; [ fromSource ];
     mainProgram = "ocr";
     maintainers = with maintainers; [ fridh ];
-    platforms = source.platforms;
+    platforms = platforms.unix;
   };
 }
