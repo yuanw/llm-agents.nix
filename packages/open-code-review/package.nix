@@ -1,6 +1,8 @@
 {
   lib,
   stdenv,
+  fetchFromGitHub,
+  installAgentSkills,
   platformSource,
   versionCheckHook,
   versionCheckHomeHook,
@@ -18,6 +20,20 @@ let
     urlTemplate = "https://github.com/alibaba/open-code-review/releases/download/v{version}/opencodereview-{platform}";
   };
   inherit (source) version;
+
+  # The releases ship only the binary, so the skills come from the source tree.
+  # The "platform" updater rewrites hashes.json only, so this hash must be
+  # refreshed by hand on a version bump (the build fails loudly otherwise).
+  skillsSrc = fetchFromGitHub {
+    owner = "alibaba";
+    repo = "open-code-review";
+    tag = "v${version}";
+    hash = "sha256-qRUlkbhGSPv+nxV4yig7EiQ6tNVyGMivm30qZd+TQwc=";
+  };
+  skills = [
+    "open-code-review"
+    "open-code-review-delegate"
+  ];
 in
 stdenv.mkDerivation {
   pname = "open-code-review";
@@ -26,11 +42,20 @@ stdenv.mkDerivation {
   # Upstream releases are single statically linked Go binaries.
   dontUnpack = true;
 
+  nativeBuildInputs = [ installAgentSkills ];
+  dontInstallAgentSkills = true;
+
   installPhase = ''
     runHook preInstall
     mkdir -p $out/bin
     install -m755 $src $out/bin/ocr
     runHook postInstall
+  '';
+
+  postInstall = ''
+    for skill in ${lib.escapeShellArgs skills}; do
+      installSkill "${skillsSrc}/skills/$skill"
+    done
   '';
 
   doInstallCheck = true;
@@ -39,6 +64,12 @@ stdenv.mkDerivation {
     versionCheckHomeHook
   ];
   versionCheckProgramArg = [ "version" ];
+
+  postInstallCheck = ''
+    for skill in ${lib.escapeShellArgs skills}; do
+      test -f "$out/share/skills/open-code-review/$skill/SKILL.md"
+    done
+  '';
 
   passthru.category = "Code Review";
   passthru.updater = mkUpdater (
